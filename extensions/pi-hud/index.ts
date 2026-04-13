@@ -141,7 +141,8 @@ export default function piHudExtension(pi: ExtensionAPI) {
           const usage = activeCtx.getContextUsage();
           const contextPercent = clampPercent(usage?.percent);
           const meterWidth = DEFAULT_METER_WIDTH;
-          const contextBar = buildBar(theme as ThemeLike, contextPercent, meterWidth);
+          const contextColor = contextPercent === null ? undefined : contextPercent >= 85 ? "error" : contextPercent >= 65 ? "warning" : "success";
+          const contextBar = buildBar(theme as ThemeLike, contextPercent, meterWidth, { color: contextColor });
           const contextText = contextPercent === null
             ? theme.fg("muted", "--%")
             : theme.fg(contextPercent >= 85 ? "error" : contextPercent >= 65 ? "warning" : "success", `${Math.round(contextPercent)}%`);
