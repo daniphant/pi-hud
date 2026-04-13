@@ -2,7 +2,7 @@
 
 <img width="1672" height="1069" alt="Screenshot 2026-04-12 at 21 30 16" src="https://github.com/user-attachments/assets/a0598e9c-7273-4745-b9b5-d31169b90f3c" />
 
-A custom Pi footer/HUD extension inspired by Claude HUD and CodexBar.
+A custom Pi footer/HUD extension inspired by [Claude HUD](https://github.com/jarrodwatts/claude-hud) and [CodexBar](https://github.com/steipete/codexbar).
 
 It adds a denser, more legible status line with:
 - active model + thinking level + context window
