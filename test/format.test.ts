@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { clampPercent, formatCompactNumber, formatContextWindow, formatResetCountdown, getProjectLabel, normalizeResetAt, normalizeZaiLimitLabel } from "../extensions/pi-hud/format.js";
+import { clampPercent, formatCompactNumber, formatContextWindow, formatResetCountdown, getAdaptiveLabel, getAdaptiveMeterWidth, getAdaptiveProjectLabel, getProjectLabel, normalizeResetAt, normalizeZaiLimitLabel } from "../extensions/pi-hud/format.js";
 
 describe("format helpers", () => {
   it("clamps percentages", () => {
@@ -31,8 +31,42 @@ describe("format helpers", () => {
   });
 
   it("formats project paths relative to home", () => {
-    expect(getProjectLabel("/Users/daniphant/projects/pi-hud", "main", "/Users/daniphant")).toBe("~/projects/pi-hud (main)");
-    expect(getProjectLabel("/tmp/demo", null, "/Users/daniphant")).toBe("/tmp/demo");
+    expect(getProjectLabel("/Users/daniphant/projects/pi-hud", "/Users/daniphant")).toBe("~/projects/pi-hud");
+    expect(getProjectLabel("/tmp/demo", "/Users/daniphant")).toBe("/tmp/demo");
+  });
+
+  it("scales meter width to terminal width", () => {
+    expect(getAdaptiveMeterWidth(160)).toBe(12);
+    expect(getAdaptiveMeterWidth(120)).toBe(10);
+    expect(getAdaptiveMeterWidth(100)).toBe(8);
+    expect(getAdaptiveMeterWidth(80)).toBe(6);
+    expect(getAdaptiveMeterWidth(60)).toBe(4);
+    expect(getAdaptiveMeterWidth(40)).toBe(3);
+  });
+
+  it("abbreviates labels on narrow terminals", () => {
+    expect(getAdaptiveLabel("Context", "Ctx", 120)).toBe("Context");
+    expect(getAdaptiveLabel("Context", "Ctx", 85)).toBe("Context");
+    expect(getAdaptiveLabel("Context", "Ctx", 80)).toBe("Ctx");
+    expect(getAdaptiveLabel("Usage", "Use", 40)).toBe("Use");
+  });
+
+  it("collapses the project path on narrow terminals", () => {
+    const cwd = "/Users/daniphant/Projects/pi-extensions";
+    const home = "/Users/daniphant";
+    expect(getAdaptiveProjectLabel(cwd, 120, home)).toBe("~/Projects/pi-extensions");
+    expect(getAdaptiveProjectLabel(cwd, 100, home)).toBe("~/Projects/pi-extensions");
+    expect(getAdaptiveProjectLabel(cwd, 80, home)).toBe("Projects/pi-extensions");
+    expect(getAdaptiveProjectLabel(cwd, 40, home)).toBe("pi-extensions");
+  });
+
+  it("leaves the home marker alone when cwd equals home", () => {
+    expect(getAdaptiveProjectLabel("/Users/daniphant", 40, "/Users/daniphant")).toBe("~");
+  });
+
+  it("handles absolute paths outside of home", () => {
+    expect(getAdaptiveProjectLabel("/tmp/some/demo", 80, "/Users/daniphant")).toBe("some/demo");
+    expect(getAdaptiveProjectLabel("/tmp/some/demo", 40, "/Users/daniphant")).toBe("demo");
   });
 
   it("formats canonical z.ai window labels", () => {

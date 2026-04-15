@@ -1,16 +1,19 @@
 import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 
-import { DEFAULT_METER_WIDTH, QUOTA_TTL_MS } from "./constants.js";
-import { formatCompactNumber, getProjectLabel, clampPercent } from "./format.js";
+import { QUOTA_TTL_MS } from "./constants.js";
+import { formatCompactNumber, getAdaptiveLabel, getAdaptiveMeterWidth, getAdaptiveProjectLabel, clampPercent } from "./format.js";
+import { getGitStatus } from "./git.js";
 import { getModelLabel } from "./model.js";
 import { fetchCodexQuota } from "./providers/codex.js";
 import { detectQuotaProvider } from "./providers/detect.js";
 import { fetchZaiQuota } from "./providers/zai.js";
-import { renderQuotaBlock, buildBar } from "./render.js";
+import { formatGitBranch, renderQuotaBlock, buildBar } from "./render.js";
 import { getSessionTotals } from "./session.js";
 import { loadSettings, saveSettings } from "./settings.js";
-import type { CachedQuotaEntry, HudSettings, PiExtensionContext, ProviderKey, ProviderQuotaSnapshot, ThemeLike } from "./types.js";
+import type { CachedQuotaEntry, GitStatus, HudSettings, PiExtensionContext, ProviderKey, ProviderQuotaSnapshot, ThemeLike } from "./types.js";
+
+const GIT_STATUS_TTL_MS = 5_000;
 
 export default function piHudExtension(pi: ExtensionAPI) {
   let enabled = true;
@@ -24,6 +27,10 @@ export default function piHudExtension(pi: ExtensionAPI) {
   let quotaCache: Partial<Record<ProviderKey, CachedQuotaEntry>> = {};
   let quotaFetchPromise: Promise<void> | null = null;
   let ticker: ReturnType<typeof setInterval> | null = null;
+  let gitStatus: GitStatus | null = null;
+  let gitStatusCwd: string | null = null;
+  let lastGitFetchAt = 0;
+  let gitFetchPromise: Promise<void> | null = null;
 
   const triggerRender = () => requestRender?.();
 
@@ -103,12 +110,55 @@ export default function piHudExtension(pi: ExtensionAPI) {
     return quotaFetchPromise;
   };
 
+  const refreshGitStatus = async (ctx: ExtensionContext, force = false) => {
+    latestCtx = ctx;
+    const cwd = ctx.cwd ?? null;
+
+    // Wipe cached status when the working directory changes so a new project doesn't
+    // inherit stale dirty/ahead counts from a previous session.
+    if (gitStatusCwd && gitStatusCwd !== cwd) {
+      gitStatus = null;
+      gitStatusCwd = null;
+      lastGitFetchAt = 0;
+      triggerRender();
+    }
+
+    if (!cwd) {
+      gitStatus = null;
+      gitStatusCwd = null;
+      lastGitFetchAt = 0;
+      return;
+    }
+
+    if (!force && Date.now() - lastGitFetchAt < GIT_STATUS_TTL_MS) return;
+    if (gitFetchPromise) return gitFetchPromise;
+
+    gitFetchPromise = (async () => {
+      try {
+        const next = await getGitStatus(cwd);
+        gitStatus = next;
+        gitStatusCwd = cwd;
+        lastGitFetchAt = Date.now();
+      } catch {
+        // Swallow probe failures; keep whatever status we had.
+      } finally {
+        gitFetchPromise = null;
+        triggerRender();
+      }
+    })();
+
+    return gitFetchPromise;
+  };
+
   const ensureTicker = (ctx: ExtensionContext) => {
     if (ticker) return;
     ticker = setInterval(() => {
       triggerRender();
       const activeCtx = getActiveCtx() ?? ctx;
-      if (enabled) void refreshQuota(activeCtx);
+      if (enabled) {
+        void refreshQuota(activeCtx);
+        void refreshGitStatus(activeCtx);
+      }
     }, 30_000);
   };
 
@@ -123,7 +173,12 @@ export default function piHudExtension(pi: ExtensionAPI) {
 
     ctx.ui.setFooter((tui, theme, footerData) => {
       requestRender = () => tui.requestRender();
-      const unsubBranch = footerData.onBranchChange(() => tui.requestRender());
+      const unsubBranch = footerData.onBranchChange(() => {
+        // A branch swap means ahead/behind and file stats are stale — force a fresh probe.
+        const activeCtx = getActiveCtx() ?? ctx;
+        void refreshGitStatus(activeCtx, true);
+        tui.requestRender();
+      });
 
       return {
         dispose() {
@@ -135,34 +190,73 @@ export default function piHudExtension(pi: ExtensionAPI) {
           if (!enabled) return [];
           const activeCtx = getActiveCtx() ?? ctx;
 
+          // Fall back to pi's synchronous branch accessor if the async probe hasn't landed yet,
+          // so the very first render still shows *something* instead of flickering empty.
+          const branchString = footerData.getGitBranch();
+          const effectiveGitStatus: GitStatus | null = gitStatus
+            ?? (branchString
+              ? { branch: branchString, isDirty: false, ahead: 0, behind: 0, fileStats: null }
+              : null);
+
           const modelLabel = theme.fg("accent", `[${getModelLabel(pi, activeCtx)}]`);
-          const projectLabel = theme.fg("text", getProjectLabel(activeCtx.cwd, footerData.getGitBranch()));
+          const projectPath = theme.fg("text", getAdaptiveProjectLabel(activeCtx.cwd, width));
+          const gitSegment = formatGitBranch(theme as ThemeLike, effectiveGitStatus);
+          const projectLabel = gitSegment ? `${projectPath} ${gitSegment}` : projectPath;
 
           const usage = activeCtx.getContextUsage();
           const contextPercent = clampPercent(usage?.percent);
-          const meterWidth = DEFAULT_METER_WIDTH;
-          const contextColor = contextPercent === null ? undefined : contextPercent >= 85 ? "error" : contextPercent >= 65 ? "warning" : "success";
+          const meterWidth = getAdaptiveMeterWidth(width);
+          // Pi returns `{percent: null}` right after a compact (until the next assistant message
+          // reports real token counts). Paint the bar muted in that state — omitting the color
+          // would fall through to buildBar's quota-remaining heuristic and light the whole
+          // empty bar up red, which looks like "context is full" when it actually means
+          // "unknown".
+          const contextColor = contextPercent === null
+            ? "muted"
+            : contextPercent >= 85 ? "error" : contextPercent >= 65 ? "warning" : "success";
           const contextBar = buildBar(theme as ThemeLike, contextPercent, meterWidth, { color: contextColor });
           const contextText = contextPercent === null
             ? theme.fg("muted", "--%")
-            : theme.fg(contextPercent >= 85 ? "error" : contextPercent >= 65 ? "warning" : "success", `${Math.round(contextPercent)}%`);
-          const contextBlock = `${theme.fg("muted", "Context")} ${contextBar} ${contextText}`;
+            : theme.fg(contextColor, `${Math.round(contextPercent)}%`);
+          // Abbreviate the label on narrow terminals so the whole block contracts, not just the
+          // bar. Otherwise "Context" (7 chars) dominates a 4-wide bar and the block looks like
+          // it isn't shrinking even though the bar itself is smaller.
+          const contextLabel = getAdaptiveLabel("Context", "Ctx", width);
+          const contextBlock = `${theme.fg("muted", contextLabel)} ${contextBar} ${contextText}`;
 
-          const quotaBlock = renderQuotaBlock(theme as ThemeLike, quotaSnapshot, showWeeklyLimits, quotaError, quotaProviderKey, meterWidth);
+          const quotaBlock = renderQuotaBlock(theme as ThemeLike, quotaSnapshot, showWeeklyLimits, quotaError, quotaProviderKey, meterWidth, width);
           const pieces = [modelLabel, projectLabel, contextBlock, quotaBlock].filter(Boolean) as string[];
-          const full = pieces.join(theme.fg("dim", " | "));
-          if (visibleWidth(full) <= width) return [full];
+          const separator = theme.fg("dim", " | ");
 
-          const withoutQuota = [modelLabel, projectLabel, contextBlock].join(theme.fg("dim", " | "));
-          if (visibleWidth(withoutQuota) <= width) return [withoutQuota];
+          // Happy path: everything fits on one row.
+          const single = pieces.join(separator);
+          if (visibleWidth(single) <= width) return [single];
 
-          const compactModel = theme.fg("accent", `[${activeCtx.model?.id || "no-model"}]`);
-          const compactProject = theme.fg("text", getProjectLabel(activeCtx.cwd, footerData.getGitBranch()));
-          const compact = [compactModel, compactProject, contextBlock].join(theme.fg("dim", " | "));
-          if (visibleWidth(compact) <= width) return [compact];
+          // Otherwise wrap across rows the way claude-hud does: greedily pack pieces left-to-right,
+          // and when a piece can't fit on the current row, start a new row with it. This keeps the
+          // context *and* usage bars visible on narrow screens instead of dropping usage entirely.
+          const lines: string[] = [];
+          let current = "";
+          let started = false;
+          for (const piece of pieces) {
+            if (!started) {
+              current = piece;
+              started = true;
+              continue;
+            }
+            const candidate: string = `${current}${separator}${piece}`;
+            if (visibleWidth(candidate) <= width) {
+              current = candidate;
+            } else {
+              lines.push(current);
+              current = piece;
+            }
+          }
+          if (started) lines.push(current);
 
-          const tiny = [compactModel, contextBlock].join(theme.fg("dim", " | "));
-          return [truncateToWidth(tiny, width)];
+          // If a single piece is still wider than the terminal (e.g. a very long model name on a
+          // cramped screen), truncate that row so we never emit a line that overflows.
+          return lines.map((line) => (visibleWidth(line) <= width ? line : truncateToWidth(line, width)));
         },
       };
     });
@@ -178,6 +272,7 @@ export default function piHudExtension(pi: ExtensionAPI) {
       installFooter(ctx);
       ensureTicker(ctx);
       void refreshQuota(ctx, false);
+      void refreshGitStatus(ctx, true);
     } else {
       ctx.ui.setFooter(undefined);
       clearTicker();
@@ -213,6 +308,7 @@ export default function piHudExtension(pi: ExtensionAPI) {
   pi.on("agent_end", async (_event, ctx) => {
     latestCtx = ctx;
     void refreshQuota(ctx);
+    void refreshGitStatus(ctx);
     triggerRender();
   });
 
@@ -224,6 +320,8 @@ export default function piHudExtension(pi: ExtensionAPI) {
   pi.on("turn_end", async (_event, ctx) => {
     latestCtx = ctx;
     void refreshQuota(ctx);
+    // Agents tend to mutate files right up to turn boundaries, so hit git again here.
+    void refreshGitStatus(ctx);
     triggerRender();
   });
 

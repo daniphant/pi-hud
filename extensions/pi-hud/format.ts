@@ -1,6 +1,8 @@
 import os from "node:os";
 import path from "node:path";
 
+import { DEFAULT_METER_WIDTH } from "./constants.js";
+
 export const clampPercent = (value: number | null | undefined) => {
   if (value === null || value === undefined || !Number.isFinite(value)) return null;
   return Math.max(0, Math.min(100, value));
@@ -22,14 +24,52 @@ export const formatContextWindow = (tokens?: number) => {
   return `${tokens}`;
 };
 
-export const getProjectLabel = (cwd: string, gitBranch: string | null, home = os.homedir()) => {
+export const getProjectLabel = (cwd: string, home = os.homedir()) => {
   const normalizedCwd = cwd || ".";
-  const displayPath = normalizedCwd === home
+  return normalizedCwd === home
     ? "~"
     : normalizedCwd.startsWith(`${home}${path.sep}`)
       ? `~${path.sep}${path.relative(home, normalizedCwd)}`
       : normalizedCwd;
-  return gitBranch ? `${displayPath} (${gitBranch})` : displayPath;
+};
+
+// Shortens the project path so it fits on narrower terminals:
+//   wide (≥100 cols)  → full relative label (e.g. ~/Projects/pi-extensions)
+//   medium (≥60 cols) → last two segments (e.g. Projects/pi-extensions)
+//   narrow (<60 cols) → basename only (e.g. pi-extensions)
+// The home marker "~" is dropped once we start trimming, since the path is no longer
+// rooted at home from the user's perspective.
+export const getAdaptiveProjectLabel = (cwd: string, terminalWidth: number, home = os.homedir()) => {
+  const fullLabel = getProjectLabel(cwd, home);
+  if (!Number.isFinite(terminalWidth) || terminalWidth <= 0 || terminalWidth >= 100) return fullLabel;
+  if (fullLabel === "~") return "~";
+
+  const segments = fullLabel.split(path.sep).filter((segment) => segment.length > 0 && segment !== "~");
+  if (segments.length === 0) return fullLabel;
+
+  const keep = terminalWidth >= 60 ? 2 : 1;
+  return segments.slice(-keep).join(path.sep);
+};
+
+// Scales progress-bar width to the terminal so the HUD stays legible on narrow screens.
+// Tiers are finer-grained than claude-hud's original three so shrinkage is visible at every
+// common terminal width instead of only kicking in once you drop below 100 or 60 columns.
+export const getAdaptiveMeterWidth = (terminalWidth: number) => {
+  if (!Number.isFinite(terminalWidth) || terminalWidth <= 0) return DEFAULT_METER_WIDTH;
+  if (terminalWidth >= 140) return 12;
+  if (terminalWidth >= 110) return 10;
+  if (terminalWidth >= 85) return 8;
+  if (terminalWidth >= 65) return 6;
+  if (terminalWidth >= 45) return 4;
+  return 3;
+};
+
+// Returns a short or long label depending on the terminal width — used to abbreviate
+// "Context"/"Usage" to "Ctx"/"Use" on narrower screens so the whole block shrinks along
+// with the bar, not just the bar in isolation.
+export const getAdaptiveLabel = (long: string, short: string, terminalWidth: number) => {
+  if (!Number.isFinite(terminalWidth) || terminalWidth <= 0) return long;
+  return terminalWidth >= 85 ? long : short;
 };
 
 export const formatResetCountdown = (epochMs: number | null, nowMs = Date.now()) => {

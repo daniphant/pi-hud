@@ -36,6 +36,21 @@ export type ZaiQuotaSnapshot = {
 export type ProviderKey = "codex" | "zai";
 export type ProviderQuotaSnapshot = CodexQuotaSnapshot | ZaiQuotaSnapshot | null;
 
+export type GitFileStats = {
+  modified: number;
+  added: number;
+  deleted: number;
+  untracked: number;
+};
+
+export type GitStatus = {
+  branch: string;
+  isDirty: boolean;
+  ahead: number;
+  behind: number;
+  fileStats: GitFileStats | null;
+};
+
 export type CachedQuotaEntry = {
   providerKey: ProviderKey;
   fetchedAt: number;
